@@ -85,12 +85,12 @@ jobs:
             echo "Dashboard heading does not contain expected text"
             exit 1
           fi
-        - name: Install kind (non-root)
-          run: |
+      - name: Install kind (non-root)
+        run: |
             curl -Lo $HOME/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
             chmod +x $HOME/kind
             echo "$HOME" >> $GITHUB_PATH
 
-        - name: Cleanup kind cluster
-          if: always()
-          run: kind delete cluster
+      - name: Cleanup kind cluster
+        if: always()
+        run: kind delete cluster
