@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["*"]
+
+jobs:
+  test-build-deploy:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository }}
+      IMAGE_TAG: ${{ github.sha }}
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: relay_user
+          POSTGRES_PASSWORD: relay_pass
+          POSTGRES_DB: relay_db
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U $POSTGRES_USER"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv (fast Python package manager)
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: uv pip install --system -r requirements.txt
+
+      - name: Run starter unit tests
+        env:
+          RELAY_DATABASE_URL: "sqlite:////tmp/agent-relay-test.db"
+        run: |
+          uv pip install --system pytest
+          uv run pytest -q
+
+      - name: Run integration tests against PostgreSQL
+        env:
+          RELAY_DATABASE_URL: "postgresql+psycopg2://relay_user:relay_pass@localhost:5432/relay_db"
+        run: |
+          uv pip install --system pytest
+          uv run pytest -q test_agent_relay.py
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} .
+
+      - name: Set up kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          version: v0.22.0
+          node_image: kindest/node:v1.28.0
+
+      - name: Load image into kind
+        run: |
+          kind load docker-image ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+      - name: Deploy to kind
+        run: |
+          kubectl apply -f k8s/postgres-deployment.yaml
+          kubectl set image deployment/agent-relay agent-relay=${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          kubectl rollout status deployment/agent-relay --timeout=120s
+
+      - name: Verify dashboard heading
+        run: |
+          kubectl port-forward svc/agent-relay 8080:80 &
+          PF_PID=$!
+          sleep 5
+          HEADING=$(curl -s http://localhost:8080 | grep -i "<h1>" | head -n1)
+          kill $PF_PID
+          if [[ "$HEADING" != *"Agent Relay v2"* ]]; then
+            echo "Dashboard heading does not contain expected text"
+            exit 1
+          fi
+        - name: Install kind (non-root)
+          run: |
+            curl -Lo $HOME/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+            chmod +x $HOME/kind
+            echo "$HOME" >> $GITHUB_PATH
+
+        - name: Cleanup kind cluster
+          if: always()
+          run: kind delete cluster
